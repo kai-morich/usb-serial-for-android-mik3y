@@ -14,6 +14,7 @@ import android.content.Context;
 import android.hardware.usb.UsbDevice;
 import android.hardware.usb.UsbDeviceConnection;
 import android.hardware.usb.UsbManager;
+import android.hardware.usb.UsbRequest;
 import android.os.Process;
 import androidx.test.core.app.ApplicationProvider;
 import androidx.test.platform.app.InstrumentationRegistry;
@@ -43,7 +44,6 @@ import com.hoho.android.usbserial.driver.UsbSerialPort.ControlLine;
 import com.hoho.android.usbserial.driver.UsbSerialPort.FlowControl;
 import com.hoho.android.usbserial.util.XonXoffFilter;
 
-
 import org.junit.After;
 import org.junit.AfterClass;
 import org.junit.Assume;
@@ -60,6 +60,7 @@ import java.io.IOException;
 import java.nio.BufferOverflowException;
 import java.util.Arrays;
 import java.util.EnumSet;
+import java.util.LinkedList;
 import java.util.List;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
@@ -1198,6 +1199,66 @@ public class DeviceTest {
         findDifference(data, expected);
         assertTrue(bufferSize > 16);
         assertTrue(data.length() != expected.length());
+    }
+
+    @Test
+    public void readQueue() throws Exception {
+        class CountingUsbRequest extends UsbRequest {
+            int count;
+            @Override public Object getClientData() { count += 1; return super.getClientData(); }
+        }
+
+        CommonUsbSerialPortWrapper.setReadQueueRequestSupplier(usb.serialPort, CountingUsbRequest::new);
+        usb.serialPort.setReadQueue(2, 0);
+        assertEquals(0, usb.serialPort.getReadQueueBufferSize());
+        usb.open(EnumSet.of(UsbWrapper.OpenCloseFlags.NO_IOMANAGER_START));
+        int len = usb.serialPort.getReadEndpoint().getMaxPacketSize();
+        assertEquals(len, usb.serialPort.getReadQueueBufferSize());
+        assertEquals(2, usb.serialPort.getReadQueueBufferCount());
+        assertEquals(0, usb.ioManager.getReadQueueBufferCount()); // not set at port yet
+        assertThrows(IllegalStateException.class, () -> usb.ioManager.setReadQueue(1)); // cannot reduce bufferCount
+        usb.ioManager.setReadQueue(2);
+        usb.ioManager.start();
+        usb.serialPort.setReadQueue(3, 0);
+        usb.serialPort.setReadQueue(3, len);
+        usb.ioManager.setReadQueue(4);
+
+        usb.setParameters(115200, 8, 1, UsbSerialPort.PARITY_NONE);
+        telnet.setParameters(115200, 8, 1, UsbSerialPort.PARITY_NONE);
+        // linux kernel does round-robin
+        LinkedList<UsbRequest> requests = CommonUsbSerialPortWrapper.getReadQueueRequests(usb.serialPort);
+        assertNotNull(requests);
+        for (int i=0; i<4*4; i++) {
+            telnet.write(new byte[1]);
+            usb.read(1);
+        }
+        for (UsbRequest request : requests) {
+            int count = ((CountingUsbRequest)request).count;
+            if(usb.serialDriver instanceof FtdiSerialDriver) {
+                assertTrue(String.valueOf(count), count >= 4);
+            } else {
+                assertEquals(String.valueOf(count), 4, count);
+            }
+        }
+        usb.ioManager.setReadQueue(6);
+        for (int i=0; i<3*6; i++) {
+            telnet.write(new byte[1]);
+            usb.read(1);
+        }
+        for (UsbRequest request : requests) {
+            int count = ((CountingUsbRequest)request).count;
+            if(usb.serialDriver instanceof FtdiSerialDriver) {
+                assertTrue(String.valueOf(count), count >= 3);
+            } else {
+                assertTrue(String.valueOf(count), count == 7 || count == 3);
+            }
+        }
+        usb.close();
+        usb.open(EnumSet.of(UsbWrapper.OpenCloseFlags.NO_IOMANAGER_START));
+        usb.serialPort.setReadQueue(8, len);
+        assertThrows(IllegalStateException.class, () -> usb.serialPort.read(new byte[len], 1) ); // cannot use timeout != 0
+        assertThrows(IllegalStateException.class, () -> usb.serialPort.read(new byte[4], 0) ); // cannot use different length
+        assertThrows(IllegalStateException.class, () -> usb.ioManager.start()); // cannot reduce bufferCount
     }
 
     @Test

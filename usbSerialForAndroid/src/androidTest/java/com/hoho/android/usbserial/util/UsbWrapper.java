@@ -198,7 +198,6 @@ public class UsbWrapper implements SerialInputOutputManager.Listener {
                 serialPort.close();
             } catch (Exception ignored) {
             }
-            //usbSerialPort = null;
         }
         if(!flags.contains(OpenCloseFlags.NO_DEVICE_CONNECTION)) {
             deviceConnection = null; // closed in usbSerialPort.close()
